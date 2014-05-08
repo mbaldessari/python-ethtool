@@ -805,8 +805,8 @@ static PyObject *__struct_desc_create_dict(struct struct_desc *table,
 out:
 	return dict;
 free_dict:
-	goto out;
 	dict = NULL;
+	goto out;
 }
 
 #define struct_desc_create_dict(table, values) \
