@@ -463,6 +463,127 @@ static PyObject *get_module(PyObject *self __unused, PyObject *args)
 	return PyString_FromString(((struct ethtool_drvinfo *)buf)->driver);
 }
 
+static PyObject *get_stats(PyObject *self __unused, PyObject *args)
+{
+	struct {
+		struct ethtool_sset_info hdr;
+		u32 buf[1];
+	} sset_info;
+
+	struct ethtool_drvinfo drvinfo;
+	struct ethtool_stats *stats = NULL;
+	struct ethtool_gstrings *strings = NULL;
+	struct ifreq ifr;
+	const char *devname;
+	char *buf;
+	int fd, err;
+	unsigned int n_stats, sz_stats;
+	ptrdiff_t drvinfo_offset = offsetof(struct ethtool_drvinfo, n_stats);
+	u32 len = 0, i;
+	PyObject *ret_obj = NULL, *objval;
+
+	if (!PyArg_ParseTuple(args, "s", &devname))
+		return NULL;
+
+	/* Open control socket. */
+	fd = socket(AF_INET, SOCK_DGRAM, 0);
+	if (fd < 0)
+		return PyErr_SetFromErrno(PyExc_OSError);
+
+	/* Setup our main control structure */
+	memset(&ifr, 0, sizeof(ifr));
+	strncpy(&ifr.ifr_name[0], devname, IFNAMSIZ);
+	ifr.ifr_name[IFNAMSIZ - 1] = 0;
+	ifr.ifr_data = (caddr_t) &sset_info;
+
+	/* First we get the stringset length */
+	sset_info.hdr.cmd = ETHTOOL_GSSET_INFO;
+	sset_info.hdr.reserved = 0;
+	sset_info.hdr.sset_mask = 1ULL << ETH_SS_STATS;
+	err = ioctl(fd, SIOCETHTOOL, &ifr);
+	if (err == 0)
+		len = sset_info.hdr.sset_mask ? sset_info.hdr.data[0] : 0;
+	else if (errno == EOPNOTSUPP && drvinfo_offset != 0) {
+		/* Fallback for old kernel versions */
+		drvinfo.cmd = ETHTOOL_GDRVINFO;
+		ifr.ifr_data = &drvinfo;
+		if (ioctl(fd, SIOCETHTOOL, &ifr)) {
+			ret_obj = PyErr_SetFromErrno(PyExc_IOError);
+			goto out;
+		}
+
+		len = *(u32 *)((char *)&drvinfo + drvinfo_offset);
+	} else {
+		ret_obj = PyErr_SetFromErrno(PyExc_IOError);
+		goto out;
+	}
+
+	strings = calloc(1, sizeof(*strings) + len * ETH_GSTRING_LEN);
+	if (!strings) {
+		ret_obj = PyErr_SetFromErrno(PyExc_OSError);
+		goto out;
+	}
+
+	/* New we fetch the strings */
+	strings->cmd = ETHTOOL_GSTRINGS;
+	strings->string_set = ETH_SS_STATS;
+	strings->len = len;
+	ifr.ifr_data = (caddr_t) strings;
+	if (len != 0 && ioctl(fd, SIOCETHTOOL, &ifr)) {
+		ret_obj = PyErr_SetFromErrno(PyExc_IOError);
+		goto out;
+	}
+	/* Make sure all strings are null terminated */
+	for (i = 0; i < len; i++)
+		strings->data[(i + 1) * ETH_GSTRING_LEN - 1] = 0;
+
+	/* No statistics present, return empty dictionary */
+	n_stats = strings->len;
+	if (n_stats < 1) {
+		free(strings);
+		close(fd);
+		return PyDict_New();
+	}
+
+	sz_stats = n_stats * sizeof(u64);
+	stats = calloc(1, sz_stats + sizeof(struct ethtool_stats));
+	if (!stats) {
+		ret_obj = PyErr_SetFromErrno(PyExc_OSError);
+		goto out;
+	}
+
+	stats->cmd = ETHTOOL_GSTATS;
+	stats->n_stats = n_stats;
+	ifr.ifr_data = (caddr_t) stats;
+	err = ioctl(fd, SIOCETHTOOL, &ifr);
+	if (err < 0) {
+		ret_obj = PyErr_SetFromErrno(PyExc_IOError);
+		goto out;
+	}
+	ret_obj = PyDict_New();
+	if (ret_obj == NULL) {
+		ret_obj = PyErr_SetFromErrno(PyExc_OSError);
+		goto out;
+	}
+	for (i = 0; i < n_stats; i++) {
+		objval = PyInt_FromLong(stats->data[i]);
+		if (objval == NULL)
+			goto out;
+		buf = (char *)&strings->data[i * ETH_GSTRING_LEN];
+		if (PyDict_SetItemString(ret_obj, buf, objval) != 0) {
+			Py_DECREF(objval);
+			goto out;
+		}
+		Py_DECREF(objval);
+	}
+
+out:
+	free(strings);
+	free(stats);
+	close(fd);
+	return ret_obj;
+}
+
 static PyObject *get_businfo(PyObject *self __unused, PyObject *args)
 {
 	struct ethtool_cmd ecmd;
@@ -893,6 +1014,11 @@ static struct PyMethodDef PyEthModuleMethods[] = {
 	{
 		.ml_name = "get_flags",
 		.ml_meth = (PyCFunction)get_flags,
+		.ml_flags = METH_VARARGS,
+	},
+	{
+		.ml_name = "get_stats",
+		.ml_meth = (PyCFunction)get_stats,
 		.ml_flags = METH_VARARGS,
 	},
 	{	.ml_name = NULL, },
