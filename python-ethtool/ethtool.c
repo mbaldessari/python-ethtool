@@ -567,7 +567,7 @@ static PyObject *get_stats(PyObject *self __unused, PyObject *args)
 		goto out;
 	}
 	for (i = 0; i < n_stats; i++) {
-		objval = PyInt_FromLong(stats->data[i]);
+		objval = PyLong_FromUnsignedLongLong(stats->data[i]);
 		if (objval == NULL)
 			goto out;
 		buf = (char *)&strings->data[i * ETH_GSTRING_LEN];
